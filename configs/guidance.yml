@@ -1,0 +1,41 @@
+model:
+  name: yolo26n.pt
+  conf: 0.25
+  iou: 0.45
+  imgsz: 640
+  tracker: bytetrack.yaml
+  class_labels:
+    - person
+    - bicycle
+    - motorcycle
+    - car
+    - bus
+    - truck
+    - dog
+    - cat
+
+planner:
+  planning_band:
+    top_fraction: 0.42
+    bottom_fraction: 0.92
+  base_safety_radius_px: 22
+  extra_person_scooter_radius_px: 18
+  scooter_width_fraction: 0.16
+  min_gap_width_fraction: 0.28
+  emergency_stop_distance_fraction: 0.16
+  slow_down_distance_fraction: 0.34
+  prediction_horizon_s: 0.9
+  track_velocity_alpha: 0.65
+  occupancy_slowdown_threshold: 0.42
+  speedup_gap_width_fraction: 0.45
+  center_preference_weight: 0.30
+  blind_corner_edge_fraction: 0.15
+  path_samples: 9
+
+overlay:
+  show_debug_text: true
+  show_planning_band: true
+
+api:
+  host: 127.0.0.1
+  port: 8765
