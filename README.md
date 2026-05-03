@@ -20,6 +20,10 @@ It is intentionally a prototype, not an autonomous control stack. The current co
   planner unit tests
 - `docs/prototype_plan.md`
   exact end-to-end build plan, current model recommendation, and dataset guidance
+- `scooter_open_path_guidance_app/evaluate.py`
+  evaluation entry point for detector metrics and end-to-end guidance accuracy
+- `docs/metrics.md`
+  how to measure mAP, command accuracy, confusion matrix, and guidance regression quality
 
 ## Prototype Features
 
@@ -126,6 +130,29 @@ More detail, including the current `YOLO26` vs `YOLO11` vs `YOLO12` recommendati
 - This is an advisory CV system, not autonomous control.
 - The path overlay is a debug aid and demo surface, not a navigation guarantee.
 - The most valuable next step is adding real depth and a small custom scooter safety dataset.
+
+## Metrics
+
+The repository now supports two kinds of evaluation:
+
+- detector metrics with Ultralytics validation
+  measures `mAP50`, `mAP50-95`, precision, recall, and per-class performance on a labeled detection dataset
+- end-to-end guidance metrics on labeled video frames
+  measures command accuracy, macro precision/recall/F1, confusion matrix, and optional risk/heading error
+
+Detector evaluation:
+
+```bash
+python -m scooter_open_path_guidance_app.evaluate detect --model yolo26n.pt --data path/to/data.yaml --split val
+```
+
+Guidance evaluation:
+
+```bash
+python -m scooter_open_path_guidance_app.evaluate guidance path/to/video.mp4 --annotations path/to/guidance_labels.json
+```
+
+More detail is in `docs/metrics.md`.
 
 ## Proof that it works
 Create new venv, activate, install requirements.txt
