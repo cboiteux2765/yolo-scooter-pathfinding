@@ -24,6 +24,8 @@ It is intentionally a prototype, not an autonomous control stack. The current co
   evaluation entry point for detector metrics and end-to-end guidance accuracy
 - `docs/metrics.md`
   how to measure mAP, command accuracy, confusion matrix, and guidance regression quality
+- `docs/end_to_end_testing.md`
+  staged real-world validation checklist for bench, walk, and closed-course testing
 
 ## Prototype Features
 
@@ -41,6 +43,8 @@ It is intentionally a prototype, not an autonomous control stack. The current co
   the phone dashboard can speak short guidance instructions such as stop, slow down, or move slightly left
 - local-first spoken guidance
   the Python runner can speak instructions directly on the inference device so voice is not dependent on Wi-Fi or phone polling
+- OpenTelemetry instrumentation
+  optional traces and metrics around OpenCV capture, YOLO inference, planning, overlay rendering, publishing, and voice queueing
 
 ## Install
 
@@ -127,6 +131,36 @@ That path keeps:
 
 Use the phone dashboard only as an optional observer surface, not as the critical real-time guidance path.
 
+## Telemetry
+
+There are two telemetry layers in this repo:
+
+- app telemetry
+  the live JSON payload published at `/latest` already contains command, risk, heading, and obstacle state for the latest frame
+- OpenTelemetry
+  optional traces and metrics now instrument the OpenCV loop itself so you can see where latency and failures come from
+
+Enable console export:
+
+```bash
+python -m scooter_open_path_guidance_app.app 0 --otel --otel-exporter console
+```
+
+Enable OTLP/HTTP export to a collector:
+
+```bash
+python -m scooter_open_path_guidance_app.app 0 --otel --otel-exporter otlp_http --otel-endpoint http://127.0.0.1:4318
+```
+
+The OpenTelemetry integration records:
+
+- one `guidance.frame` span per processed frame
+- child spans for capture, inference, planning, overlay, publish, and speech queueing
+- counters for processed frames, capture failures, and emitted commands
+- histograms for frame latency, stage latency, detections per frame, obstacles per frame, and risk score
+
+This instrumentation is manual and code-based. That follows the OpenTelemetry Python guidance for manual instrumentation with the SDK and API, and OTLP endpoint configuration through environment or exporter setup.
+
 ## Tuning
 
 Edit `configs/guidance.yml` to tune:
@@ -196,6 +230,17 @@ python -m scooter_open_path_guidance_app.evaluate guidance path/to/video.mp4 --a
 ```
 
 More detail is in `docs/metrics.md`.
+
+## End-to-End Testing
+
+The safest way to test this in real life is staged:
+
+1. Indoor bench test with a webcam or saved clip.
+2. Outdoor walk test with the scooter while you stay off it.
+3. Closed-course ride test in an empty lot or path.
+4. Telemetry review to confirm where latency and bad commands came from.
+
+The detailed checklist is in `docs/end_to_end_testing.md`.
 
 ## Proof that it works
 Create new venv, activate, install requirements.txt

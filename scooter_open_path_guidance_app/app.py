@@ -4,6 +4,7 @@ import argparse
 import json
 import socket
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from ultralytics import YOLO
 from .guidance_core import GuidancePlanner, TrackedObstacle, build_instruction_text
 from .http_api import GuidancePublisher
 from .speech import InstructionSpeaker
+from .telemetry import GuidanceTelemetry, TelemetryConfig
 
 
 PERSON_LABELS = {"person"}
@@ -42,6 +44,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-port", type=int, default=None, help="HTTP port for the mobile dashboard")
     parser.add_argument("--speak", action="store_true", help="speak guidance locally on the inference device")
     parser.add_argument("--speech-rate", type=int, default=185, help="words per minute for local speech")
+    parser.add_argument("--otel", action="store_true", help="enable OpenTelemetry traces and metrics")
+    parser.add_argument(
+        "--otel-exporter",
+        choices=("console", "otlp_http"),
+        default="console",
+        help="telemetry exporter to use when --otel is enabled",
+    )
+    parser.add_argument(
+        "--otel-endpoint",
+        default=None,
+        help="OTLP base endpoint, for example http://127.0.0.1:4318",
+    )
+    parser.add_argument(
+        "--otel-service-name",
+        default="scooter-open-path-guidance",
+        help="OpenTelemetry service.name resource attribute",
+    )
+    parser.add_argument(
+        "--otel-metric-interval-ms",
+        type=int,
+        default=5000,
+        help="metric export interval in milliseconds",
+    )
     parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--max-frames", type=int, default=None, help="useful for short test runs")
     return parser.parse_args()
@@ -362,6 +387,7 @@ def main() -> None:
 
     publisher = None
     speaker = None
+    telemetry = None
     if args.api:
         api_host = args.api_host or str(api_cfg.get("host", "127.0.0.1"))
         api_port = args.api_port or int(api_cfg.get("port", 8765))
@@ -376,6 +402,15 @@ def main() -> None:
         print(f"Phone dashboard: http://{announced_host}:{api_port}/")
     if args.speak:
         speaker = InstructionSpeaker(rate=args.speech_rate)
+    if args.otel:
+        telemetry = GuidanceTelemetry(
+            TelemetryConfig(
+                service_name=args.otel_service_name,
+                exporter=args.otel_exporter,
+                endpoint=args.otel_endpoint,
+                metric_export_interval_ms=args.otel_metric_interval_ms,
+            )
+        )
 
     capture = cv2.VideoCapture(resolve_source(args.source))
     if not capture.isOpened():
@@ -389,86 +424,150 @@ def main() -> None:
 
     try:
         while True:
-            ok, frame = capture.read()
-            if not ok:
-                break
+            frame_started_at = time.perf_counter()
+            if telemetry is not None:
+                frame_span_context = telemetry.frame_span(frame_index=frame_index, source=str(args.source))
+            else:
+                frame_span_context = nullcontext()
 
-            results = model.track(
-                frame,
-                persist=True,
-                verbose=False,
-                conf=conf,
-                iou=iou,
-                imgsz=imgsz,
-                device=args.device,
-                tracker=tracker,
-                classes=class_filter,
-            )
-            result = results[0]
-            detections = extract_raw_detections(result)
-            now_s = time.time()
-            obstacles = convert_to_obstacles(
-                detections,
-                frame.shape[1],
-                track_memory,
-                now_s,
-                velocity_alpha,
-                rider_radius_boost,
-            )
-            decision = planner.plan(frame.shape[1], frame.shape[0], obstacles)
-            instruction_text = build_instruction_text(decision, frame.shape[1])
-            annotated = draw_guidance_overlay(
-                frame,
-                decision,
-                obstacles,
-                bool(overlay_cfg.get("show_planning_band", True)),
-                bool(overlay_cfg.get("show_debug_text", True)),
-            )
-
-            payload = {
-                "timestamp": now_s,
-                "frame_index": frame_index,
-                "command": decision.command,
-                "speed_factor": decision.speed_factor,
-                "risk_score": decision.risk_score,
-                "recommended_heading_px": decision.recommended_heading_px,
-                "reasons": decision.reasons,
-                "instruction_text": instruction_text,
-                "voice_instruction": instruction_text,
-                "decision": decision.to_payload(),
-                "obstacles": [
-                    {
-                        "label": obstacle.label,
-                        "track_id": obstacle.track_id,
-                        "center": obstacle.center,
-                        "radius_px": obstacle.radius_px,
-                        "vx": obstacle.vx,
-                        "vy": obstacle.vy,
-                    }
-                    for obstacle in obstacles
-                ],
-            }
-            if publisher is not None:
-                publisher.update(payload, frame_jpeg=encode_frame_jpeg(annotated))
-            if speaker is not None:
-                speaker.submit(instruction_text)
-
-            if args.output:
-                if output_writer is None:
-                    output_writer = ensure_writer(args.output, capture, annotated.shape)
-                output_writer.write(annotated)
-
-            if not args.no_display:
-                cv2.imshow("Scooter Open Path Guidance", annotated)
-                key = cv2.waitKey(1) & 0xFF
-                if key in {27, ord("q")}:
+            with frame_span_context as frame_span:
+                stage_attrs = {"frame.index": frame_index}
+                if telemetry is not None:
+                    with telemetry.stage("capture", stage_attrs) as capture_span:
+                        ok, frame = capture.read()
+                        capture_span.set_attribute("capture.ok", ok)
+                else:
+                    ok, frame = capture.read()
+                if not ok:
+                    if telemetry is not None:
+                        telemetry.record_capture_failure(source=str(args.source))
                     break
-                if key == ord("j"):
-                    print(json.dumps(payload, indent=2))
 
-            frame_index += 1
-            if args.max_frames is not None and frame_index >= args.max_frames:
-                break
+                if telemetry is not None:
+                    with telemetry.stage("inference", stage_attrs):
+                        results = model.track(
+                            frame,
+                            persist=True,
+                            verbose=False,
+                            conf=conf,
+                            iou=iou,
+                            imgsz=imgsz,
+                            device=args.device,
+                            tracker=tracker,
+                            classes=class_filter,
+                        )
+                else:
+                    results = model.track(
+                        frame,
+                        persist=True,
+                        verbose=False,
+                        conf=conf,
+                        iou=iou,
+                        imgsz=imgsz,
+                        device=args.device,
+                        tracker=tracker,
+                        classes=class_filter,
+                    )
+                result = results[0]
+                detections = extract_raw_detections(result)
+                now_s = time.time()
+                obstacles = convert_to_obstacles(
+                    detections,
+                    frame.shape[1],
+                    track_memory,
+                    now_s,
+                    velocity_alpha,
+                    rider_radius_boost,
+                )
+                if telemetry is not None:
+                    with telemetry.stage("planning", stage_attrs):
+                        decision = planner.plan(frame.shape[1], frame.shape[0], obstacles)
+                else:
+                    decision = planner.plan(frame.shape[1], frame.shape[0], obstacles)
+                instruction_text = build_instruction_text(decision, frame.shape[1])
+                if telemetry is not None:
+                    with telemetry.stage("overlay", stage_attrs):
+                        annotated = draw_guidance_overlay(
+                            frame,
+                            decision,
+                            obstacles,
+                            bool(overlay_cfg.get("show_planning_band", True)),
+                            bool(overlay_cfg.get("show_debug_text", True)),
+                        )
+                else:
+                    annotated = draw_guidance_overlay(
+                        frame,
+                        decision,
+                        obstacles,
+                        bool(overlay_cfg.get("show_planning_band", True)),
+                        bool(overlay_cfg.get("show_debug_text", True)),
+                    )
+
+                payload = {
+                    "timestamp": now_s,
+                    "frame_index": frame_index,
+                    "command": decision.command,
+                    "speed_factor": decision.speed_factor,
+                    "risk_score": decision.risk_score,
+                    "recommended_heading_px": decision.recommended_heading_px,
+                    "reasons": decision.reasons,
+                    "instruction_text": instruction_text,
+                    "voice_instruction": instruction_text,
+                    "decision": decision.to_payload(),
+                    "obstacles": [
+                        {
+                            "label": obstacle.label,
+                            "track_id": obstacle.track_id,
+                            "center": obstacle.center,
+                            "radius_px": obstacle.radius_px,
+                            "vx": obstacle.vx,
+                            "vy": obstacle.vy,
+                        }
+                        for obstacle in obstacles
+                    ],
+                }
+                if publisher is not None:
+                    if telemetry is not None:
+                        with telemetry.stage("publish", stage_attrs):
+                            publisher.update(payload, frame_jpeg=encode_frame_jpeg(annotated))
+                    else:
+                        publisher.update(payload, frame_jpeg=encode_frame_jpeg(annotated))
+                if speaker is not None:
+                    if telemetry is not None:
+                        with telemetry.stage("speech_queue", stage_attrs):
+                            speaker.submit(instruction_text)
+                    else:
+                        speaker.submit(instruction_text)
+
+                if args.output:
+                    if output_writer is None:
+                        output_writer = ensure_writer(args.output, capture, annotated.shape)
+                    output_writer.write(annotated)
+
+                if not args.no_display:
+                    cv2.imshow("Scooter Open Path Guidance", annotated)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key in {27, ord("q")}:
+                        break
+                    if key == ord("j"):
+                        print(json.dumps(payload, indent=2))
+
+                if telemetry is not None and frame_span is not None:
+                    telemetry.record_frame(
+                        frame_span=frame_span,
+                        frame_index=frame_index,
+                        frame_width=frame.shape[1],
+                        frame_height=frame.shape[0],
+                        detections=len(detections),
+                        obstacles=len(obstacles),
+                        command=decision.command,
+                        risk_score=decision.risk_score,
+                        latency_ms=(time.perf_counter() - frame_started_at) * 1000.0,
+                    )
+
+                frame_index += 1
+                if args.max_frames is not None and frame_index >= args.max_frames:
+                    break
     finally:
         capture.release()
         if output_writer is not None:
@@ -477,6 +576,8 @@ def main() -> None:
             publisher.stop()
         if speaker is not None:
             speaker.close()
+        if telemetry is not None:
+            telemetry.shutdown()
         if not args.no_display:
             cv2.destroyAllWindows()
 

@@ -4,4 +4,5 @@ __all__ = [
     "guidance_core",
     "http_api",
     "speech",
+    "telemetry",
 ]
