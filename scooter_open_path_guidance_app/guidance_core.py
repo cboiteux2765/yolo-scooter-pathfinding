@@ -334,3 +334,35 @@ class GuidancePlanner:
             x = start_x + (target_x - start_x) * (smooth * (1.0 - mid_pull) + t * mid_pull)
             path.append((int(round(x)), y))
         return path
+
+
+def describe_heading(recommended_heading_px: float, frame_width: int) -> str:
+    if frame_width <= 0:
+        return "center"
+    normalized = recommended_heading_px / max(frame_width * 0.5, 1.0)
+    magnitude = abs(normalized)
+    if magnitude < 0.08:
+        return "center"
+    direction = "left" if normalized < 0.0 else "right"
+    if magnitude < 0.36:
+        return f"slightly {direction}"
+    return direction
+
+
+def build_instruction_text(decision: GuidanceDecision, frame_width: int) -> str:
+    heading_text = describe_heading(decision.recommended_heading_px, frame_width)
+    if decision.command == "stop":
+        return "Stop now."
+    if decision.command == "wait":
+        return "Wait and hold position."
+    if decision.command == "slow_down":
+        if heading_text == "center":
+            return "Slow down and hold center."
+        return f"Slow down and move {heading_text}."
+    if decision.command == "speed_up":
+        if heading_text == "center":
+            return "Path is clear. Speed up and hold center."
+        return f"Path is clear. Speed up and move {heading_text}."
+    if heading_text == "center":
+        return "Maintain speed and hold center."
+    return f"Maintain speed and move {heading_text}."

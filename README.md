@@ -11,7 +11,7 @@ It is intentionally a prototype, not an autonomous control stack. The current co
 - `scooter_open_path_guidance_app/guidance_core.py`
   heuristic planner that inflates obstacles, predicts motion, finds open horizontal gaps, and emits `maintain_speed`, `slow_down`, `speed_up`, `wait`, or `stop`
 - `scooter_open_path_guidance_app/http_api.py`
-  built-in HTTP endpoint for polling the latest guidance payload from a phone or Streamlit client
+  built-in HTTP endpoint plus live mobile dashboard for polling the latest guidance payload and annotated frame from a phone browser
 - `scooter_open_path_guidance_app/export_yolo26n.py`
   helper to export a YOLO checkpoint to ONNX
 - `configs/guidance.yml`
@@ -36,7 +36,11 @@ It is intentionally a prototype, not an autonomous control stack. The current co
 - dynamic illuminated corridor overlay
   the planner draws a pseudo-3D safe path for debugging and demo purposes
 - optional phone/Streamlit bridge
-  the local process can publish the latest command as JSON
+  the local process can publish the latest command as JSON and a live phone dashboard
+- browser voice guidance
+  the phone dashboard can speak short guidance instructions such as stop, slow down, or move slightly left
+- local-first spoken guidance
+  the Python runner can speak instructions directly on the inference device so voice is not dependent on Wi-Fi or phone polling
 
 ## Install
 
@@ -78,11 +82,50 @@ Publish the latest guidance decision for a phone client:
 python -m scooter_open_path_guidance_app.app 0 --api
 ```
 
-The polling endpoint is:
+Open the live dashboard in a browser on the same computer:
+
+```text
+http://127.0.0.1:8765/
+```
+
+The raw polling endpoint is:
 
 ```text
 http://127.0.0.1:8765/latest
 ```
+
+Use it from your phone on the same Wi-Fi network:
+
+```bash
+python -m scooter_open_path_guidance_app.app 0 --api --api-host 0.0.0.0
+```
+
+Then open:
+
+```text
+http://<your-computer-ip>:8765/
+```
+
+The phone page shows:
+
+- the latest annotated frame
+- the current command and risk
+- the reasons behind the command
+- a one-tap voice guidance button that uses the phone browser's speech engine
+
+For the lowest-latency setup, keep guidance local to the device running inference:
+
+```bash
+python -m scooter_open_path_guidance_app.app 0 --speak
+```
+
+That path keeps:
+
+- YOLO inference local
+- path planning local
+- spoken instructions local
+
+Use the phone dashboard only as an optional observer surface, not as the critical real-time guidance path.
 
 ## Tuning
 

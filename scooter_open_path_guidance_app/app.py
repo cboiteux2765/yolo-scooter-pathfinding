@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,9 @@ import numpy as np
 import yaml
 from ultralytics import YOLO
 
-from .guidance_core import GuidancePlanner, TrackedObstacle
+from .guidance_core import GuidancePlanner, TrackedObstacle, build_instruction_text
 from .http_api import GuidancePublisher
+from .speech import InstructionSpeaker
 
 
 PERSON_LABELS = {"person"}
@@ -36,6 +38,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=None)
     parser.add_argument("--tracker", default=None, help="bytetrack.yaml or botsort.yaml")
     parser.add_argument("--api", action="store_true", help="publish latest guidance at /latest")
+    parser.add_argument("--api-host", default=None, help="HTTP host, use 0.0.0.0 for phone access")
+    parser.add_argument("--api-port", type=int, default=None, help="HTTP port for the mobile dashboard")
+    parser.add_argument("--speak", action="store_true", help="speak guidance locally on the inference device")
+    parser.add_argument("--speech-rate", type=int, default=185, help="words per minute for local speech")
     parser.add_argument("--no-display", action="store_true")
     parser.add_argument("--max-frames", type=int, default=None, help="useful for short test runs")
     return parser.parse_args()
@@ -320,6 +326,22 @@ def ensure_writer(path: str, capture: cv2.VideoCapture, frame_shape: tuple[int, 
     return cv2.VideoWriter(path, fourcc, fps, (width, height))
 
 
+def encode_frame_jpeg(frame: Any, quality: int = 75) -> bytes | None:
+    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        return None
+    return encoded.tobytes()
+
+
+def discover_lan_ip() -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("8.8.8.8", 80))
+            return str(probe.getsockname()[0])
+    except OSError:
+        return None
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(Path(args.config))
@@ -339,12 +361,21 @@ def main() -> None:
     class_filter = resolve_class_filter(model, model_cfg.get("class_labels"))
 
     publisher = None
+    speaker = None
     if args.api:
+        api_host = args.api_host or str(api_cfg.get("host", "127.0.0.1"))
+        api_port = args.api_port or int(api_cfg.get("port", 8765))
         publisher = GuidancePublisher(
-            host=str(api_cfg.get("host", "127.0.0.1")),
-            port=int(api_cfg.get("port", 8765)),
+            host=api_host,
+            port=api_port,
         )
         publisher.start()
+        announced_host = api_host
+        if api_host == "0.0.0.0":
+            announced_host = discover_lan_ip() or "<your-computer-ip>"
+        print(f"Phone dashboard: http://{announced_host}:{api_port}/")
+    if args.speak:
+        speaker = InstructionSpeaker(rate=args.speech_rate)
 
     capture = cv2.VideoCapture(resolve_source(args.source))
     if not capture.isOpened():
@@ -385,6 +416,7 @@ def main() -> None:
                 rider_radius_boost,
             )
             decision = planner.plan(frame.shape[1], frame.shape[0], obstacles)
+            instruction_text = build_instruction_text(decision, frame.shape[1])
             annotated = draw_guidance_overlay(
                 frame,
                 decision,
@@ -401,6 +433,8 @@ def main() -> None:
                 "risk_score": decision.risk_score,
                 "recommended_heading_px": decision.recommended_heading_px,
                 "reasons": decision.reasons,
+                "instruction_text": instruction_text,
+                "voice_instruction": instruction_text,
                 "decision": decision.to_payload(),
                 "obstacles": [
                     {
@@ -415,7 +449,9 @@ def main() -> None:
                 ],
             }
             if publisher is not None:
-                publisher.update(payload)
+                publisher.update(payload, frame_jpeg=encode_frame_jpeg(annotated))
+            if speaker is not None:
+                speaker.submit(instruction_text)
 
             if args.output:
                 if output_writer is None:
@@ -439,6 +475,8 @@ def main() -> None:
             output_writer.release()
         if publisher is not None:
             publisher.stop()
+        if speaker is not None:
+            speaker.close()
         if not args.no_display:
             cv2.destroyAllWindows()
 
